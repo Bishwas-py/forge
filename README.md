@@ -2,6 +2,9 @@
 
 Universal dev workflow plugin for [Claude Code](https://code.claude.com). Auto-detects your stack, orchestrates the full development lifecycle from task pickup to merged PR — works on any project, any language.
 
+<img width="124" height="124" alt="image" src="https://github.com/user-attachments/assets/0f57b96e-5869-4876-b30a-5bd2cbcabc4c" />
+
+
 ## Install
 
 ```bash
