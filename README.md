@@ -9,14 +9,20 @@ Universal dev workflow plugin for [Claude Code](https://code.claude.com). Auto-d
 
 First, add the marketplace:
 
-```bash
-claude marketplace add Bishwas-py/forge
+```
+/plugin marketplace add Bishwas-py/forge
 ```
 
 Then install the plugin:
 
-```bash
-claude plugin install forge
+```
+/plugin install forge
+```
+
+To update to the latest version:
+
+```
+/plugin marketplace update
 ```
 
 ## What It Does
