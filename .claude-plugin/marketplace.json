@@ -1,0 +1,17 @@
+{
+  "name": "forge",
+  "owner": {
+    "name": "Bishwas Bhandari",
+    "email": "hello@bishwas.net"
+  },
+  "metadata": {
+    "description": "Universal dev workflow plugin for Claude Code — works on any project, any stack"
+  },
+  "plugins": [
+    {
+      "name": "forge",
+      "source": "./",
+      "description": "Auto-detects your stack, orchestrates the full dev lifecycle from Linear tasks to merged PRs"
+    }
+  ]
+}

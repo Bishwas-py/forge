@@ -1,0 +1,10 @@
+{
+  "name": "forge",
+  "description": "Universal dev workflow plugin — auto-detects your stack, orchestrates Linear tasks, GitHub PRs, CodeRabbit reviews, linting, testing, and deployment for any project.",
+  "version": "1.0.0",
+  "author": {
+    "name": "Bishwas Bhandari"
+  },
+  "repository": "https://github.com/Bishwas-py/forge",
+  "license": "MIT"
+}
