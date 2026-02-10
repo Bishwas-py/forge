@@ -40,31 +40,113 @@ If security scanning is configured:
 
 ## 5. Self Code Review
 
-The final and most important step. Use the **code-review** plugin to perform an extensive review:
+The final and most important step. This is a strict, line-by-line review of every change made in this session. Nothing gets past this gate without being examined.
 
-### What to Check
-- **Correctness** — Does the code do what the task requires? Are edge cases handled?
-- **Security** — Any injection risks, exposed secrets, missing auth checks?
-- **Logic errors** — Off-by-one, null handling, race conditions?
-- **Code quality** — Naming clarity, function length, duplication, dead code
-- **Acceptance criteria** — Does this match what the Linear task asked for?
+### Step 1: Collect All Changes
 
-### How to Review
-1. Run `git diff` to see all changes
-2. Review every changed file, function by function
-3. Check that tests cover the new/changed behavior
-4. Use **code-simplifier** to clean up overly complex code
-5. If issues found — fix them, then re-run lint and tests
+Run `git diff` (staged + unstaged) to get the complete picture. Review **every single file**, **every single hunk**. Do not skim. Do not skip files because they "look fine."
 
-### Review Verdict
+### Step 2: Review Each File
+
+For every changed file, check all of the following. If any issue is found, log it — do not fix silently.
+
+**Correctness**
+- Does this change do exactly what the task requires? Not more, not less.
+- Are all edge cases handled? Empty inputs, null values, boundary conditions, zero-length collections, concurrent access.
+- Are error paths handled? What happens when this fails?
+- Are return types and values correct in all branches?
+
+**Security**
+- Any hardcoded secrets, API keys, tokens, passwords?
+- Any SQL injection, XSS, command injection, path traversal vectors?
+- Any missing auth or permission checks on new endpoints/routes?
+- Any sensitive data logged or exposed in error messages?
+- Any new dependencies with known vulnerabilities?
+
+**Logic**
+- Off-by-one errors in loops, slices, ranges, pagination?
+- Null/undefined dereferences? Optional chaining where needed?
+- Race conditions in async code? Missing awaits?
+- Incorrect operator precedence? `==` vs `===`, `and` vs `or` confusion?
+- Dead code paths that can never execute?
+
+**Data integrity**
+- Are database operations wrapped in transactions where needed?
+- Any writes without proper validation?
+- Any cascade deletes that could destroy unintended data?
+- Are migrations reversible?
+
+**Performance**
+- Any N+1 queries introduced?
+- Any unbounded loops or missing pagination?
+- Any large objects held in memory unnecessarily?
+- Any blocking calls in async contexts?
+
+**Code quality**
+- Are names clear and accurate? Does the name match what it actually does?
+- Any functions doing too many things?
+- Any duplicated logic that should be extracted?
+- Any dead code, unused imports, commented-out blocks?
+- Does the code follow the project's existing patterns and conventions?
+
+**Test coverage**
+- Are there tests for the new/changed behavior?
+- Do the tests cover both happy path and error cases?
+- Are the tests actually asserting the right things (not just "does not throw")?
+
+**Acceptance criteria**
+- Does this change satisfy the task requirements (Linear task, user request, etc.)?
+- Is anything missing that was asked for?
+- Is anything included that was NOT asked for?
+
+### Step 3: Present Findings
+
+After reviewing all files, present a structured report to the user:
+
+```
+## Self-Review Results
+
+### Issues Found: <count>
+
+**[MUST FIX]** (blocks PR creation)
+1. `path/to/file.ts:42` — SQL injection: user input passed directly to query
+2. `path/to/handler.py:18` — Missing auth check on DELETE endpoint
+
+**[SHOULD FIX]** (strongly recommended before PR)
+1. `path/to/utils.ts:91` — N+1 query in loop, will degrade with scale
+2. `path/to/component.svelte:33` — Unhandled error state shows blank screen
+
+**[CONSIDER]** (minor, up to user)
+1. `path/to/service.py:55` — Variable name `d` is unclear, suggest `duration`
+
+### No Issues Found In:
+- `path/to/clean-file.ts`
+- `path/to/another-clean-file.py`
+```
+
+Categorize every issue:
+- **MUST FIX** — Security vulnerabilities, data loss risks, broken functionality, missing auth. These block PR creation unconditionally.
+- **SHOULD FIX** — Performance issues, missing error handling, poor test coverage, logic concerns. Present to user with strong recommendation to fix.
+- **CONSIDER** — Style, naming, minor cleanup. User decides.
+
+### Step 4: Resolve
+
+- **MUST FIX** items: Fix them. No exceptions. Do not ask the user if they want to skip these.
+- **SHOULD FIX** items: Present each to the user. Recommend fixing. If the user says skip, accept — but note it in the PR description.
+- **CONSIDER** items: Ask the user. Accept either answer.
+- Use **code-simplifier** to clean up any overly complex code found during review.
+
+After fixes are applied, re-run lint and tests from step 1 of the pre-PR gate. The gate restarts from the failed step, not from scratch.
+
+### Step 5: Final Verdict
+
 Only proceed to PR creation when:
-- All lint/format passes
-- All tests pass
-- E2E passes (if applicable)
-- Security scan clean (or acknowledged)
-- Self-review found no issues
+- All **MUST FIX** issues are resolved
+- All **SHOULD FIX** issues are resolved or explicitly acknowledged by user
+- Lint, tests, and E2E still pass after fixes
+- You can state with confidence: "Every changed line has been reviewed"
 
-If any step fails, fix and re-run from the beginning of the failed step.
+If you cannot confidently say that, go back and review again.
 
 ## When Steps Are Not Configured
 

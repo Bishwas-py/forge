@@ -18,6 +18,8 @@ How Forge stores and retrieves learned project knowledge across sessions.
 ## When to Store
 
 Store knowledge whenever:
+- Task source is chosen (Linear, GitHub Issues, or none)
+- Linear team/prefix is identified (if using Linear)
 - Project stack is detected and confirmed by user
 - Lint/test/build/security commands are identified or configured
 - User establishes a naming convention (branches, commits)
@@ -42,6 +44,11 @@ Write in plain Markdown that Claude Code reads naturally. Use clear sections.
 ### Team-Shared Example (`.claude/CLAUDE.md`)
 
 ```markdown
+## Task Management
+- Source: Linear
+- Team: Makolabs
+- Prefix: MAK
+
 ## Project Stack
 - Backend: Python 3.12 / FastAPI
 - Frontend: TypeScript / SvelteKit

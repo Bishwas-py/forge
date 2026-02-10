@@ -2,10 +2,10 @@
 name: forge
 description: >
   Universal dev workflow orchestrator. Use this skill whenever working on any software project —
-  picking up tasks from Linear, creating branches, developing features, running linting and tests,
-  creating PRs, handling CodeRabbit reviews, or deploying. Trigger on any mention of tasks, issues,
-  PR workflows, code review, linting, testing, migrations, deployments, or dev workflow questions.
-  Works on any tech stack — auto-detects languages, frameworks, and tooling.
+  picking up tasks from Linear or GitHub Issues, creating branches, developing features, running
+  linting and tests, creating PRs, handling CodeRabbit reviews, or deploying. Trigger on any mention
+  of tasks, issues, PR workflows, code review, linting, testing, migrations, deployments, or dev
+  workflow questions. Works on any tech stack — auto-detects languages, frameworks, and tooling.
 ---
 
 # Forge — Universal Dev Workflow
@@ -17,7 +17,27 @@ Forge orchestrates the full development lifecycle for any project, any stack. It
 1. **Never assume — always ask.** When uncertain about stack, conventions, or next steps, ask the user.
 2. **Detect, don't hardcode.** Read project files to infer the stack. Don't rely on a fixed list of known frameworks.
 3. **Remember decisions.** Once the user confirms something, store it so they're never asked twice.
-4. **Resume, don't restart.** On every session, read current state (git, PRs, Linear) and pick up where things left off.
+4. **Resume, don't restart.** On every session, read current state (git, PRs, tasks) and pick up where things left off.
+
+---
+
+## Plugin Map
+
+Each workflow phase delegates to specific plugins. If a plugin is not installed, Forge skips that delegation and handles what it can natively.
+
+| Phase | Plugins | What happens |
+|-------|---------|--------------|
+| Read state | **linear** or `gh` | Fetch tasks from stored source, check open PRs and CI status |
+| Pick a task | **linear** or `gh` | Fetch backlog, rank priorities, let user choose |
+| Create branch | `gh` | Get task ID from task source, create branch with naming convention |
+| Develop (backend/general) | **feature-dev** | Structured development with codebase analysis and architecture focus |
+| Develop (frontend/UI) | **frontend-design**, **feature-dev** | Design + implement UI components with high design quality |
+| Pre-PR gate: E2E | **playwright** | Visual verification of critical user flows |
+| Pre-PR gate: cleanup | **code-simplifier** | Simplify overly complex code before PR |
+| Pre-PR gate: self-review | *(Forge itself)* | `git diff` all session changes — review for bugs, logic errors, security issues |
+| Create PR | **github** | `gh pr create` with description + task reference |
+| Review cycle | **github** | Fetch PR comments, check CI, push fixes |
+| Merge + close | `gh`, **linear** (if used) | Merge PR, task auto-updates via branch naming or `Closes #N` |
 
 ---
 
@@ -34,13 +54,17 @@ Before doing anything, assess where the project stands right now.
 - Run `gh pr list --state open` and `gh pr view` if on a PR branch
 - Check for: pending reviews, CodeRabbit comments, failing CI
 
-### Linear State
-- Use the **linear** plugin to check assigned/in-progress tasks
-- Check if current branch maps to a Linear issue
+### Task State
+Check the stored task source for current work:
+- **Linear** → use the **linear** plugin to check assigned/in-progress tasks
+- **GitHub Issues** → run `gh issue list --assignee @me --state open`
+- **None** → skip, rely on git state only
+
+Check if current branch maps to a task (Linear prefix or `#N` issue number).
 
 ### Synthesize and Present
 Combine all signals into a concise status summary:
-> "You're on branch `feature/user-auth`, with 3 uncommitted files. There's an open PR with 2 unresolved CodeRabbit comments and passing CI. Your Linear task MAK-42 is marked In Progress."
+> "You're on branch `feature/user-auth`, with 3 uncommitted files. There's an open PR with 2 unresolved CodeRabbit comments and passing CI. Your task PROJ-42 is marked In Progress."
 
 Then **ask the user** what they want to do next. Never auto-resume.
 
@@ -50,12 +74,29 @@ Then **ask the user** what they want to do next. Never auto-resume.
 
 When the user wants to pick up new work:
 
-1. Use the **linear** plugin to fetch open/backlog tasks
-2. Rank them by:
-   - **Usefulness** — user impact, unblocks other work, addresses critical bugs
-   - **Complexity** — estimated effort, number of repos affected, risk level
-3. Present the top 3–5 recommendations with a short rationale for each
-4. **Ask the user which task to work on** — never auto-select
+### First run — identify task source
+On first run, ask once and store the answer:
+> "Where do you track tasks for this project?"
+> - **Linear** (which team?)
+> - **GitHub Issues**
+> - **Neither** — I'll just ask you what to work on
+
+### Fetching tasks
+
+**Linear path:**
+1. Use the **linear** plugin to fetch open/backlog tasks **filtered to the stored team**
+2. Rank by usefulness (user impact, unblocks work, critical bugs) and complexity (effort, risk)
+3. Present top 3–5 with rationale
+
+**GitHub Issues path:**
+1. Run `gh issue list --state open` to fetch open issues
+2. Rank by the same criteria — read labels, milestones, and descriptions to assess priority
+3. Present top 3–5 with rationale
+
+**Neither path:**
+Skip fetching. Ask the user what they want to work on.
+
+In all cases: **ask the user which task to work on** — never auto-select.
 
 ---
 
@@ -119,14 +160,23 @@ Recommend a GitHub Actions workflow matching the detected stack.
 
 1. On first use, ask the user for their **branch naming convention** and store it.
    - Examples: `username/TASK-<N>-<desc>`, `feature/<desc>`, `fix/<desc>`
-2. If a Linear task is selected, extract the task identifier for the branch name
+2. Extract the task identifier for the branch name:
+   - **Linear** → use the prefix + number (e.g., `MAK-42`)
+   - **GitHub Issues** → use the issue number (e.g., `42`)
+   - **Neither** → no task ID, just the description
 3. Create the branch following the stored convention
 
 ---
 
 ## Phase 5: Development
 
-Work on the feature across the detected repos. During development:
+Delegate to the right plugin based on what's being built:
+
+- **Backend / general code** → use **feature-dev** for structured development with codebase analysis
+- **Frontend / UI work** → use **frontend-design** for high-quality component and page design, then **feature-dev** for implementation
+- **Both** → use both plugins across their respective areas
+
+During development:
 
 - Respect any stored **hard rules** (e.g. "never edit generated files", "never write migration SQL by hand")
 - If the user added multiple working directories, work across them as needed
@@ -151,38 +201,41 @@ If configured, run E2E tests (e.g. Playwright). Also use the **playwright** plug
 If configured, run the stored security scanning commands.
 
 ### 5. Self Code Review
-Before submitting the PR, perform an extensive self-review:
-- Review every changed file for bugs, logic errors, security issues, and missed edge cases
-- Check for code quality: naming, structure, duplication
-- Verify the changes match the task's acceptance criteria
-- Use **code-simplifier** to clean up any overly complex code
-- Only after this self-review passes should you create the PR
+Strict, line-by-line review of every change made in this session. No file gets skipped.
+- Run `git diff` — review every file, every hunk
+- Check: correctness, security, logic, data integrity, performance, test coverage, acceptance criteria
+- Categorize issues as **MUST FIX** (blocks PR), **SHOULD FIX** (recommend to user), or **CONSIDER** (user decides)
+- Fix all MUST FIX issues without asking. Present SHOULD FIX and CONSIDER to user.
+- Use **code-simplifier** to clean up overly complex code
+- Re-run lint and tests after any fixes
+- For the full review checklist, read `references/pre-pr-gate.md`
 
 If a step has no configured command (user previously chose "skip"), skip it silently.
-
-For detailed pre-PR procedures, read `references/pre-pr-gate.md`
 
 ---
 
 ## Phase 7: PR + Review Cycle
 
-1. **Create PR** — `gh pr create` with a clear title and description referencing the Linear task
+1. **Create PR** — `gh pr create` with a clear title and description referencing the task:
+   - **Linear** → include task ID in description. Branch naming auto-links the PR to Linear.
+   - **GitHub Issues** → include `Closes #N` in description. GitHub auto-closes the issue on merge.
+   - **Neither** → just describe the change.
 2. **Wait for CodeRabbit** — it reviews automatically
 3. **Address feedback** — fetch CodeRabbit comments, fix issues, push updates
 4. **Get approval** — ensure all review comments are resolved
 5. **Merge** — merge to main/develop per project convention
-
-If the branch naming convention includes the task identifier, Linear auto-links the PR.
 
 ---
 
 ## Phase 8: Knowledge Persistence
 
 Throughout the workflow, you will discover new information about the project:
+- Task source and team mapping (Linear, GitHub Issues, or none)
 - Stack details, framework versions
 - Lint/test/build commands
 - Naming conventions, hard rules
 - Repo structure, generated file locations
+- Gap decisions (skipped tooling)
 
 **Every time crucial top-level info is discovered, ask the user where to store it:**
 - **Team-shared** (`.claude/CLAUDE.md`) — visible to all team members, git tracked
@@ -198,8 +251,8 @@ For the storage format and detailed guidance, read `references/knowledge-persist
 
 | Step | What happens |
 |------|--------------|
-| Read state | Git status, open PRs, Linear tasks — present summary, ask user |
-| Pick a task | Fetch backlog, rank by usefulness + complexity, user decides |
+| Read state | Git status, open PRs, tasks (Linear / GitHub Issues / none) — present summary, ask user |
+| Pick a task | Fetch from stored task source, rank by usefulness + complexity, user decides |
 | Detect project | Scan files, infer stack, user confirms, store knowledge |
 | Fill gaps | Missing linter/tests/security/CI? Recommend, user decides, store |
 | Create branch | Follow stored naming convention, include task ID |
@@ -207,5 +260,5 @@ For the storage format and detailed guidance, read `references/knowledge-persist
 | Pre-PR gate | Lint, test, E2E, security, self-review — all must pass |
 | Create PR | `gh pr create` with description + task reference |
 | Review cycle | CodeRabbit comments → fix → get approval |
-| Merge | Merge → deploy (if configured) → Linear auto-updates |
+| Merge | Merge → deploy (if configured) → task auto-updates |
 | Persist knowledge | New discovery → ask user: team-shared or personal? → store |
