@@ -404,12 +404,12 @@ Running recon against `main` only tests merged code. Open PRs contain unmerged c
 Each PR gets a fully isolated environment:
 
 ```
-PR #42 ─── git worktree ─── docker compose -p recon-pr-42 ─── UI :5180, API :8010, DB :5442
-PR #45 ─── git worktree ─── docker compose -p recon-pr-45 ─── UI :5181, API :8011, DB :5443
-PR #48 ─── git worktree ─── docker compose -p recon-pr-48 ─── UI :5182, API :8012, DB :5444
+PR #42 ─── git archive ─── docker compose -p recon-42 ─── UI :5180, API :8010, DB :5442
+PR #45 ─── git archive ─── docker compose -p recon-45 ─── UI :5181, API :8011, DB :5443
+PR #48 ─── git archive ─── docker compose -p recon-48 ─── UI :5182, API :8012, DB :5444
 ```
 
-Docker Compose's `-p` (project name) flag namespaces ALL resources — containers, networks, volumes — so environments are completely isolated from each other.
+Branch code is extracted via `git archive` into `/tmp/recon-envs/recon-<id>/src/` — no git worktrees needed. Docker Compose's `-p` (project name) flag namespaces ALL resources — containers, networks, volumes — so environments are completely isolated from each other.
 
 ### The `recon-env.sh` script
 
@@ -435,7 +435,7 @@ bash "${CLAUDE_SKILL_DIR}/scripts/recon-env.sh" ports <count>
 bash "${CLAUDE_SKILL_DIR}/scripts/recon-env.sh" nuke
 ```
 
-The script handles: git worktree creation, Docker Compose startup with port injection via `RECON_UI_PORT`/`RECON_API_PORT`/`RECON_DB_PORT` environment variables, health polling, metadata tracking, and full cleanup.
+The script handles: branch code extraction via `git archive`, Docker Compose startup with port injection via `RECON_UI_PORT`/`RECON_API_PORT`/`RECON_DB_PORT` environment variables, health polling, metadata tracking, and full cleanup.
 
 ### 1. Discover open PRs
 
@@ -493,8 +493,8 @@ bash "${CLAUDE_SKILL_DIR}/scripts/recon-env.sh" up 48 feature/dashboard-v2 5182 
 ```
 
 The script will:
-1. Create a git worktree at `/tmp/recon-envs/recon-pr-{number}`
-2. Find the docker-compose file in the worktree
+1. Extract branch code via `git archive` into `/tmp/recon-envs/recon-<id>/src/`
+2. Find the docker-compose file in the extracted directory
 3. Start Docker Compose with `RECON_UI_PORT`, `RECON_API_PORT`, `RECON_DB_PORT` injected
 4. Poll until UI and API are healthy (120s timeout)
 5. Report the status
@@ -502,10 +502,10 @@ The script will:
 **Exit codes:**
 - `0` — fully healthy, ready for recon
 - `1` — error (build failed, git error)
-- `2` — worktree created but no compose file found (Claude should generate one)
+- `2` — code extracted but no compose file found (Claude should generate one)
 - `3` — running but not all services are healthy
 
-If exit code is `2`, generate a `docker-compose.yml` in the worktree directory, then re-run the `up` command.
+If exit code is `2`, generate a `docker-compose.yml` in the extracted directory, then re-run the `up` command.
 
 If a PR fails to start, log the failure and continue with the others.
 
@@ -540,7 +540,7 @@ bash "${CLAUDE_SKILL_DIR}/scripts/recon-env.sh" down 48
 bash "${CLAUDE_SKILL_DIR}/scripts/recon-env.sh" nuke
 ```
 
-The script stops Docker Compose (with volume removal), kills any orphan processes on the allocated ports, removes the git worktree, and prunes stale refs.
+The script stops Docker Compose (with volume removal), kills any orphan processes on the allocated ports, and removes the extracted source directory.
 
 ### 6. Per-PR report
 

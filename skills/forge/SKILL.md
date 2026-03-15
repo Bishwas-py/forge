@@ -182,13 +182,12 @@ After branch creation, check if the project has a `docker-compose.yml` (or `comp
 If the user says yes or always:
 
 ```bash
-# Use recon's environment manager (shared tooling)
-bash "${CLAUDE_SKILL_DIR}/../recon/scripts/recon-env.sh" up <task_id> <branch> 5180 8010 5442
+# Use recon's environment manager in dev mode (current directory, no extraction)
+bash "${CLAUDE_SKILL_DIR}/../recon/scripts/recon-env.sh" dev 5180 8010 5442
 ```
 
 This creates:
-- A git worktree at `/tmp/recon-envs/recon-pr-<task_id>` (shared naming with recon for consistency)
-- Docker Compose services on isolated ports
+- Docker Compose services on isolated ports (code stays in current directory)
 - Health-checked, ready-to-use environment
 
 Print the environment details:
@@ -224,7 +223,7 @@ During development:
 - Respect any stored **hard rules** (e.g. "never edit generated files", "never write migration SQL by hand")
 - If the user added multiple working directories, work across them as needed
 - If a directory is missing, ask the user to add it (`/add-dir`)
-- If a dev environment was spun up in Phase 4, reference its URLs when running or testing the app. The environment's ports are stored in `/tmp/recon-envs/recon-pr-<task_id>/.recon-env`.
+- If a dev environment was spun up in Phase 4, reference its URLs when running or testing the app. The environment's ports are stored in `/tmp/recon-envs/recon-<id>/env.meta`.
 
 ### Environment management during development
 
@@ -299,7 +298,7 @@ If a step has no configured command (user previously chose "skip"), skip it sile
    ```bash
    bash "${CLAUDE_SKILL_DIR}/../recon/scripts/recon-env.sh" down <task_id>
    ```
-   This removes the Docker containers, volumes, network, and git worktree. Clean slate for the next task.
+   This removes the Docker containers, volumes, and network. Clean slate for the next task.
 
 ---
 
