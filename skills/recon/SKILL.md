@@ -393,112 +393,130 @@ To fix all issues: /forge read the confidence letter and gain 100%
 
 ## Phase 6 — Per-PR Recon (Parallel Branch Auditing)
 
-When the user runs `/forge:recon --per-pr` or asks to "recon all open PRs" or "test each PR branch," recon audits every open PR branch in parallel using git worktrees and isolated server instances.
+When the user runs `/forge:recon --per-pr` or asks to "recon all open PRs" or "test each PR branch," recon audits every open PR branch in parallel using **isolated Docker Compose environments** managed by the `recon-env.sh` orchestration script.
 
 ### Why this exists
 
-Running recon against `main` only tests merged code. Open PRs contain unmerged changes that may introduce regressions, security issues, or data inconsistencies. Per-PR recon catches these before merge by checking out each branch, building it, running servers, and auditing the live result.
+Running recon against `main` only tests merged code. Open PRs contain unmerged changes that may introduce regressions, security issues, or data inconsistencies. Per-PR recon catches these before merge by checking out each branch, building it in an isolated Docker environment, and auditing the live result.
+
+### Architecture
+
+Each PR gets a fully isolated environment:
+
+```
+PR #42 ─── git worktree ─── docker compose -p recon-pr-42 ─── UI :5180, API :8010, DB :5442
+PR #45 ─── git worktree ─── docker compose -p recon-pr-45 ─── UI :5181, API :8011, DB :5443
+PR #48 ─── git worktree ─── docker compose -p recon-pr-48 ─── UI :5182, API :8012, DB :5444
+```
+
+Docker Compose's `-p` (project name) flag namespaces ALL resources — containers, networks, volumes — so environments are completely isolated from each other.
+
+### The `recon-env.sh` script
+
+All environment lifecycle operations use `${CLAUDE_SKILL_DIR}/scripts/recon-env.sh`:
+
+```bash
+# Spin up an isolated environment for a PR
+bash "${CLAUDE_SKILL_DIR}/scripts/recon-env.sh" up <pr_number> <branch> <ui_port> <api_port> <db_port>
+
+# Check if it's running
+bash "${CLAUDE_SKILL_DIR}/scripts/recon-env.sh" status <pr_number>
+
+# Tear it down
+bash "${CLAUDE_SKILL_DIR}/scripts/recon-env.sh" down <pr_number>
+
+# List all active environments
+bash "${CLAUDE_SKILL_DIR}/scripts/recon-env.sh" list
+
+# Allocate port ranges for N PRs
+bash "${CLAUDE_SKILL_DIR}/scripts/recon-env.sh" ports <count>
+
+# Destroy everything
+bash "${CLAUDE_SKILL_DIR}/scripts/recon-env.sh" nuke
+```
+
+The script handles: git worktree creation, Docker Compose startup with port injection via `RECON_UI_PORT`/`RECON_API_PORT`/`RECON_DB_PORT` environment variables, health polling, metadata tracking, and full cleanup.
 
 ### 1. Discover open PRs
 
-List all open PRs for the current repo:
+List all open PRs:
 
 ```bash
 gh pr list --state open --json number,title,headRefName --limit 20
 ```
 
-Present the list to the user:
+Present the list and wait for user confirmation. They may exclude PRs or select specific ones.
 
-```
-Open PRs found:
-  #42  feature/user-auth       "Add user authentication"
-  #45  fix/pricing-display     "Fix price rounding on order page"
-  #48  feature/dashboard-v2    "Redesign dashboard layout"
+### 2. Check for Docker Compose file
 
-Run recon on all 3, or select specific PRs?
-```
+The project needs a `docker-compose.yml` (or `compose.yml`) that uses environment variables for port binding. Check if one exists:
 
-Wait for user confirmation. They may exclude PRs or select specific ones.
+- If the project already has a compose file that supports port variables, use it directly.
+- If the project has a compose file with hardcoded ports, inform the user that ports need to be parameterized. Suggest using `${RECON_UI_PORT:-5173}` syntax for default-with-override.
+- If no compose file exists, **generate one** based on the detected stack from Phase 1. The compose file should use `RECON_UI_PORT`, `RECON_API_PORT`, and `RECON_DB_PORT` environment variables.
 
-### 2. Detect stack and build commands
+Example compose file structure for a typical stack:
 
-Before creating worktrees, detect how to build and run the project. Read the project's stored knowledge (from `.claude/CLAUDE.md` or forge's persisted state) or detect fresh:
-
-- **Frontend build**: `npm run build`, `npm run dev`, `pnpm dev`, etc.
-- **Backend build**: `pip install -e .`, `cargo build`, `go build`, etc.
-- **Frontend start command**: what starts the dev server
-- **Backend start command**: what starts the API server
-- **DB setup**: does each branch need its own DB, or can they share a read-only DB?
-
-Ask the user to confirm the build/start commands if not already stored.
-
-### 3. Port allocation
-
-Assign unique port ranges to each PR to avoid conflicts. The main app keeps its default ports.
-
-```
-Port allocation:
-  PR #42 (feature/user-auth):      UI=5180, API=8010
-  PR #45 (fix/pricing-display):    UI=5181, API=8011
-  PR #48 (feature/dashboard-v2):   UI=5182, API=8012
+```yaml
+services:
+  frontend:
+    build: ./frontend
+    ports:
+      - "${RECON_UI_PORT:-5173}:5173"
+  backend:
+    build: ./backend
+    ports:
+      - "${RECON_API_PORT:-8000}:8000"
+    environment:
+      - DATABASE_URL=postgresql://user:pass@db:5432/app
+  db:
+    image: postgres:16
+    ports:
+      - "${RECON_DB_PORT:-5432}:5432"
+    environment:
+      - POSTGRES_PASSWORD=pass
+      - POSTGRES_DB=app
 ```
 
-Port formula:
-- UI port: `5180 + index`
-- API port: `8010 + index`
+### 3. Allocate ports and spin up environments
 
-This keeps all instances on distinct ports with no collisions.
-
-### 4. Create worktrees
-
-For each selected PR, create an isolated git worktree. Use the Agent tool with `isolation: "worktree"` if available, or create worktrees manually:
+Use the script to allocate ports and spin up each PR:
 
 ```bash
-git worktree add /tmp/recon-pr-42 origin/feature/user-auth
-git worktree add /tmp/recon-pr-45 origin/fix/pricing-display
-git worktree add /tmp/recon-pr-48 origin/feature/dashboard-v2
+# See what ports will be assigned
+bash "${CLAUDE_SKILL_DIR}/scripts/recon-env.sh" ports 3
+
+# Spin up each PR environment
+bash "${CLAUDE_SKILL_DIR}/scripts/recon-env.sh" up 42 feature/user-auth 5180 8010 5442
+bash "${CLAUDE_SKILL_DIR}/scripts/recon-env.sh" up 45 fix/pricing-display 5181 8011 5443
+bash "${CLAUDE_SKILL_DIR}/scripts/recon-env.sh" up 48 feature/dashboard-v2 5182 8012 5444
 ```
 
-Each worktree is a full checkout of that branch in an isolated directory.
+The script will:
+1. Create a git worktree at `/tmp/recon-envs/recon-pr-{number}`
+2. Find the docker-compose file in the worktree
+3. Start Docker Compose with `RECON_UI_PORT`, `RECON_API_PORT`, `RECON_DB_PORT` injected
+4. Poll until UI and API are healthy (120s timeout)
+5. Report the status
 
-### 5. Build and start servers (parallel)
+**Exit codes:**
+- `0` — fully healthy, ready for recon
+- `1` — error (build failed, git error)
+- `2` — worktree created but no compose file found (Claude should generate one)
+- `3` — running but not all services are healthy
 
-For each worktree, in parallel:
+If exit code is `2`, generate a `docker-compose.yml` in the worktree directory, then re-run the `up` command.
 
-1. **Install dependencies**:
-   ```bash
-   cd /tmp/recon-pr-42 && npm install  # or pip install, cargo build, etc.
-   ```
+If a PR fails to start, log the failure and continue with the others.
 
-2. **Start frontend** on the allocated port:
-   ```bash
-   cd /tmp/recon-pr-42 && PORT=5180 npm run dev &
-   ```
+### 4. Run recon per PR (parallel agents)
 
-3. **Start backend** on the allocated port:
-   ```bash
-   cd /tmp/recon-pr-42 && PORT=8010 python -m uvicorn app:main &
-   ```
-   (Adapt commands to the detected stack. Use environment variables or CLI flags to set the port.)
-
-4. **Wait for healthy**: Poll the allocated ports until both UI and API respond:
-   ```bash
-   for i in $(seq 1 30); do
-     curl -s -o /dev/null -w '%{http_code}' http://localhost:5180 && break
-     sleep 2
-   done
-   ```
-
-5. **If build fails**: Record the failure, skip this PR, continue with others. Report the build failure in the final output.
-
-### 6. Run recon per PR (parallel agents)
-
-Dispatch parallel agents — one per PR. Each agent runs the full recon workflow (Phase 1 through Phase 5) against its allocated URLs:
+Dispatch parallel agents — one per PR. Each agent runs the full recon workflow (Phase 2 through Phase 5) against its allocated URLs:
 
 ```
-Agent 1: recon against http://localhost:5180 (API: http://localhost:8010) — PR #42
-Agent 2: recon against http://localhost:5181 (API: http://localhost:8011) — PR #45
-Agent 3: recon against http://localhost:5182 (API: http://localhost:8012) — PR #48
+Agent 1: recon against http://localhost:5180 (API: http://localhost:8010, DB: localhost:5442) — PR #42
+Agent 2: recon against http://localhost:5181 (API: http://localhost:8011, DB: localhost:5443) — PR #45
+Agent 3: recon against http://localhost:5182 (API: http://localhost:8012, DB: localhost:5444) — PR #48
 ```
 
 Each agent:
@@ -508,33 +526,23 @@ Each agent:
 - Runs Phase 4 crawl & verify
 - Produces Phase 5 confidence letter, named `recon-confidence-letter-YYYY-MM-DD-pr-{number}.md`
 
-The DB can be shared if all branches use the same schema, or each agent can use its own DB container if the stack supports it. Ask the user during setup.
+### 5. Teardown
 
-### 7. Teardown
+After all agents complete, clean up every environment:
 
-After all agents complete:
+```bash
+# Tear down each PR individually
+bash "${CLAUDE_SKILL_DIR}/scripts/recon-env.sh" down 42
+bash "${CLAUDE_SKILL_DIR}/scripts/recon-env.sh" down 45
+bash "${CLAUDE_SKILL_DIR}/scripts/recon-env.sh" down 48
 
-1. **Stop all servers**: Kill the processes started in step 5
-   ```bash
-   # Kill by port
-   lsof -ti:5180 | xargs kill 2>/dev/null
-   lsof -ti:8010 | xargs kill 2>/dev/null
-   # ... repeat for each PR's ports
-   ```
+# Or nuke everything at once
+bash "${CLAUDE_SKILL_DIR}/scripts/recon-env.sh" nuke
+```
 
-2. **Remove worktrees**:
-   ```bash
-   git worktree remove /tmp/recon-pr-42 --force
-   git worktree remove /tmp/recon-pr-45 --force
-   git worktree remove /tmp/recon-pr-48 --force
-   ```
+The script stops Docker Compose (with volume removal), kills any orphan processes on the allocated ports, removes the git worktree, and prunes stale refs.
 
-3. **Prune stale worktree refs**:
-   ```bash
-   git worktree prune
-   ```
-
-### 8. Per-PR report
+### 6. Per-PR report
 
 After all agents finish, produce a combined summary:
 
@@ -543,19 +551,17 @@ Per-PR Recon Complete.
 
 PR #42 (feature/user-auth):      Confidence: 85/100  — 3 issues (1 critical, 2 warnings)
 PR #45 (fix/pricing-display):    Confidence: 92/100  — 1 issue (1 warning)
-PR #48 (feature/dashboard-v2):   Confidence: 78/100  — 5 issues (2 critical, 2 warnings, 1 info)
-                                 BUILD FAILED         — npm install error (missing dep)
+PR #48 (feature/dashboard-v2):   BUILD FAILED         — docker compose error (missing Dockerfile)
 
 Individual confidence letters:
   recon-confidence-letter-2026-03-15-pr-42.md
   recon-confidence-letter-2026-03-15-pr-45.md
-  recon-confidence-letter-2026-03-15-pr-48.md
 
 To fix issues in a specific PR:
   git checkout feature/user-auth && /forge read the confidence letter and gain 100%
 ```
 
-### 9. Integration with forge
+### 7. Integration with forge
 
 When the user wants to fix a specific PR's issues:
 
@@ -563,11 +569,12 @@ When the user wants to fix a specific PR's issues:
 2. Run `/forge read the confidence letter and gain 100%` — forge reads `recon-confidence-letter-*-pr-42.md`
 3. Forge fixes the issues on that branch
 4. Push the fixes to the PR
-5. Re-run `/forge:recon --per-pr` or just recon that single branch to verify
+5. Re-run `/forge:recon --per-pr` or recon that single branch to verify
 
 ### Per-PR mode constraints
 
-- **Max parallel PRs**: Default 5. More than 5 simultaneous builds/servers may exhaust system resources. If more than 5 PRs are open, batch them in groups of 5.
-- **Timeout**: Each PR gets 10 minutes max for build + server startup. If it doesn't start in time, skip it.
-- **Shared DB**: By default, all PR branches share the same database. If a branch has migration changes, warn the user that the DB may need to be branched too.
-- **Resource check**: Before starting, check available memory and CPU. If the system looks resource-constrained, suggest running PRs sequentially instead of in parallel.
+- **Max parallel PRs**: Default 5. More than 5 simultaneous Docker environments may exhaust system resources. If more than 5 PRs are open, batch them in groups of 5.
+- **Timeout**: Each PR gets 120 seconds for Docker Compose startup + health check. If it doesn't start in time, skip it.
+- **Docker required**: Per-PR mode requires Docker and Docker Compose to be installed and running.
+- **Compose file**: The project's docker-compose file must support port parameterization via `RECON_UI_PORT`, `RECON_API_PORT`, `RECON_DB_PORT` environment variables. If it doesn't, Claude will modify or generate one.
+- **Resource check**: Before starting, verify Docker has sufficient resources allocated. If the system looks constrained, suggest running PRs sequentially.
