@@ -247,6 +247,80 @@ For the storage format and detailed guidance, read `references/knowledge-persist
 
 ---
 
+## Phase 9: Confidence Letter Loop (Recon Integration)
+
+When the user says "read the confidence letter and gain 100%" or similar, forge enters fix-loop mode.
+
+### 1. Find the letter
+
+Look for the most recent `recon-confidence-letter-*.md` in the project root. If not found, tell the user to run `/forge:recon` first.
+
+### 2. Parse findings
+
+Read the confidence letter and extract every finding that is NOT `[PASS]`:
+
+- `[CRITICAL]` → **MUST FIX** — fix immediately, no questions asked
+- `[FAIL]` → **MUST FIX** — fix immediately
+- `[WARN]` → **SHOULD FIX** — present to user, recommend fixing
+- `[INFO]` → **CONSIDER** — present to user, let them decide
+
+For each finding, extract:
+- The description (what's wrong)
+- The category (security, data consistency, UI cleanliness, etc.)
+- The file hint (if provided — where to look)
+- The evidence (what values were found)
+
+### 3. Create fix tasks
+
+Order findings by severity (CRITICAL first), then by category (group related fixes). Present the full list to the user:
+
+```
+Recon found 12 issues. Here's the fix plan:
+
+MUST FIX (5):
+  1. [CRITICAL] CORS wildcard — backend/config/cors.py
+  2. [CRITICAL] Price mismatch on /orders — frontend/components/OrderCard.svelte
+  3. [FAIL] Negative quantity accepted — backend/validators.py + frontend form
+  4. [FAIL] Missing HSTS header — backend/middleware.py
+  5. [FAIL] FK orphans in orders table — needs migration
+
+SHOULD FIX (4):
+  6. [WARN] Contrast ratio on /dashboard — frontend/styles
+  7. [WARN] Missing alt text on 3 images — frontend/components
+  8. [WARN] Cookie missing SameSite flag — backend/auth
+  9. [WARN] Status mapping inconsistency — frontend/utils
+
+CONSIDER (3):
+  10. [INFO] Server header exposes version
+  11. [INFO] No Referrer-Policy header
+  12. [INFO] Console warning on /items page
+```
+
+Ask user to confirm or adjust the plan.
+
+### 4. Fix loop
+
+For each fix task:
+1. Read the relevant file(s) based on the fix hint and evidence
+2. Implement the fix
+3. Run lint + tests to verify nothing broke
+4. Move to next task
+
+After all MUST FIX items are done, ask user about SHOULD FIX items. After those, ask about CONSIDER items.
+
+### 5. Re-run prompt
+
+After all accepted fixes are implemented:
+
+```
+All fixes applied. Run `/forge:recon` to verify and update the confidence score.
+Current confidence was: [previous score]/100
+```
+
+The user runs `/forge:recon` again, which produces a new confidence letter. If issues remain, the user runs this phase again. The loop continues until 100% or the user is satisfied.
+
+---
+
 ## Workflow Summary
 
 | Step | What happens |

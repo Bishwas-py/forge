@@ -5,13 +5,13 @@
     "email": "hello@bishwas.net"
   },
   "metadata": {
-    "description": "Universal dev workflow plugin for Claude Code — works on any project, any stack"
+    "description": "Universal dev workflow plugin for Claude Code — dev lifecycle, security auditing, and system comparison for any project, any stack"
   },
   "plugins": [
     {
       "name": "forge",
       "source": "./",
-      "description": "Auto-detects your stack, orchestrates the full dev lifecycle from Linear tasks to merged PRs"
+      "description": "Dev workflow orchestrator with autonomous security auditing (/forge:recon), system comparison (/forge:compare), and confidence letter fix loops"
     }
   ]
 }
