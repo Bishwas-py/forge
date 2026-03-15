@@ -25,19 +25,21 @@ Forge orchestrates the full development lifecycle for any project, any stack. It
 
 Each workflow phase delegates to specific plugins. If a plugin is not installed, Forge skips that delegation and handles what it can natively.
 
-| Phase | Plugins | What happens |
-|-------|---------|--------------|
+| Phase | Plugins / Tools | What happens |
+|-------|-----------------|--------------|
 | Read state | **linear** or `gh` | Fetch tasks from stored source, check open PRs and CI status |
 | Pick a task | **linear** or `gh` | Fetch backlog, rank priorities, let user choose |
 | Create branch | `gh` | Get task ID from task source, create branch with naming convention |
+| Spin up dev env | `recon-env.sh`, **Docker Compose** | Isolated environment per branch — own UI, API, DB on dedicated ports |
 | Develop (backend/general) | **feature-dev** | Structured development with codebase analysis and architecture focus |
 | Develop (frontend/UI) | **frontend-design**, **feature-dev** | Design + implement UI components with high design quality |
+| Pre-PR gate: recon scan | **recon** scripts | Security headers, accessibility, CORS checks against live dev environment |
 | Pre-PR gate: E2E | **playwright** | Visual verification of critical user flows |
 | Pre-PR gate: cleanup | **code-simplifier** | Simplify overly complex code before PR |
 | Pre-PR gate: self-review | *(Forge itself)* | `git diff` all session changes — review for bugs, logic errors, security issues |
 | Create PR | **github** | `gh pr create` with description + task reference |
 | Review cycle | **github** | Fetch PR comments, check CI, push fixes |
-| Merge + close | `gh`, **linear** (if used) | Merge PR, task auto-updates via branch naming or `Closes #N` |
+| Merge + teardown | `gh`, **linear**, `recon-env.sh` | Merge PR, tear down dev environment, task auto-updates |
 
 ---
 
@@ -156,7 +158,9 @@ Recommend a GitHub Actions workflow matching the detected stack.
 
 ---
 
-## Phase 4: Branch Creation
+## Phase 4: Branch Creation + Environment Setup
+
+### 1. Create the branch
 
 1. On first use, ask the user for their **branch naming convention** and store it.
    - Examples: `username/TASK-<N>-<desc>`, `feature/<desc>`, `fix/<desc>`
@@ -165,6 +169,45 @@ Recommend a GitHub Actions workflow matching the detected stack.
    - **GitHub Issues** → use the issue number (e.g., `42`)
    - **Neither** → no task ID, just the description
 3. Create the branch following the stored convention
+
+### 2. Spin up dev environment (if Docker available)
+
+After branch creation, check if the project has a `docker-compose.yml` (or `compose.yml`). If it does, offer to spin up an isolated dev environment for this branch:
+
+> "This project has a Docker Compose file. Want me to spin up an isolated dev environment for this branch? You'll get your own UI, API, and DB on dedicated ports — no conflicts with anything else running."
+> - **Yes** — spin up the environment
+> - **No** — use whatever the user has running already
+> - **Always** — spin up for every branch (store this preference)
+
+If the user says yes or always:
+
+```bash
+# Use recon's environment manager (shared tooling)
+bash "${CLAUDE_SKILL_DIR}/../recon/scripts/recon-env.sh" up <task_id> <branch> 5180 8010 5442
+```
+
+This creates:
+- A git worktree at `/tmp/recon-envs/recon-pr-<task_id>` (shared naming with recon for consistency)
+- Docker Compose services on isolated ports
+- Health-checked, ready-to-use environment
+
+Print the environment details:
+
+```
+Dev environment ready:
+  Branch: feature/user-auth
+  UI:     http://localhost:5180
+  API:    http://localhost:8010
+  DB:     localhost:5442
+
+Develop against these URLs. Environment will be torn down after PR merge.
+```
+
+**If no Docker Compose file exists**, skip this step. The user manages their own servers.
+
+**If Docker is not installed**, skip this step silently.
+
+Store the environment preference (yes/no/always) so the user isn't asked every time.
 
 ---
 
@@ -181,6 +224,19 @@ During development:
 - Respect any stored **hard rules** (e.g. "never edit generated files", "never write migration SQL by hand")
 - If the user added multiple working directories, work across them as needed
 - If a directory is missing, ask the user to add it (`/add-dir`)
+- If a dev environment was spun up in Phase 4, reference its URLs when running or testing the app. The environment's ports are stored in `/tmp/recon-envs/recon-pr-<task_id>/.recon-env`.
+
+### Environment management during development
+
+If a dev environment is active:
+
+- **Check status**: `bash "${CLAUDE_SKILL_DIR}/../recon/scripts/recon-env.sh" status <task_id>` — verify services are still running
+- **Restart if needed**: If a service goes down during development (e.g., backend crash after a bad migration), tear down and re-up:
+  ```bash
+  bash "${CLAUDE_SKILL_DIR}/../recon/scripts/recon-env.sh" down <task_id>
+  bash "${CLAUDE_SKILL_DIR}/../recon/scripts/recon-env.sh" up <task_id> <branch> 5180 8010 5442
+  ```
+- **Rebuild after changes**: If the user changes Dockerfile, dependencies, or compose config, Docker Compose's `--build` flag (used by `recon-env.sh up`) handles rebuilding automatically.
 
 ---
 
@@ -200,7 +256,22 @@ If configured, run E2E tests (e.g. Playwright). Also use the **playwright** plug
 ### 4. Security Checks
 If configured, run the stored security scanning commands.
 
-### 5. Self Code Review
+### 5. Recon Quick Scan (if dev environment is active)
+
+If a dev environment was spun up in Phase 4, run a quick recon scan before the PR. This catches data consistency issues, security misconfigs, and UI problems that unit tests miss:
+
+```bash
+# Run programmatic scans only (fast, no full crawl)
+bash "${CLAUDE_SKILL_DIR}/../recon/scripts/security-scan.sh" "http://localhost:5180"
+bash "${CLAUDE_SKILL_DIR}/../recon/scripts/security-scan.sh" "http://localhost:8010"
+bash "${CLAUDE_SKILL_DIR}/../recon/scripts/accessibility-audit.sh" "http://localhost:5180"
+```
+
+If any `[CRITICAL]` findings appear, treat them as **MUST FIX** before proceeding to PR.
+
+If the user wants a full recon (crawl + cross-check + form attacks), suggest running `/forge:recon` with the dev environment URLs.
+
+### 6. Self Code Review
 Strict, line-by-line review of every change made in this session. No file gets skipped.
 - Run `git diff` — review every file, every hunk
 - Check: correctness, security, logic, data integrity, performance, test coverage, acceptance criteria
@@ -224,6 +295,11 @@ If a step has no configured command (user previously chose "skip"), skip it sile
 3. **Address feedback** — fetch CodeRabbit comments, fix issues, push updates
 4. **Get approval** — ensure all review comments are resolved
 5. **Merge** — merge to main/develop per project convention
+6. **Tear down dev environment** — if a dev environment was spun up in Phase 4, tear it down after merge:
+   ```bash
+   bash "${CLAUDE_SKILL_DIR}/../recon/scripts/recon-env.sh" down <task_id>
+   ```
+   This removes the Docker containers, volumes, network, and git worktree. Clean slate for the next task.
 
 ---
 
@@ -330,9 +406,10 @@ The user runs `/forge:recon` again, which produces a new confidence letter. If i
 | Detect project | Scan files, infer stack, user confirms, store knowledge |
 | Fill gaps | Missing linter/tests/security/CI? Recommend, user decides, store |
 | Create branch | Follow stored naming convention, include task ID |
-| Develop | Code across repos, respect hard rules |
-| Pre-PR gate | Lint, test, E2E, security, self-review — all must pass |
+| Spin up dev env | Docker Compose isolation per branch — own UI, API, DB (if Docker available) |
+| Develop | Code across repos, respect hard rules, test against isolated environment |
+| Pre-PR gate | Lint, test, E2E, recon quick scan, security, self-review — all must pass |
 | Create PR | `gh pr create` with description + task reference |
 | Review cycle | CodeRabbit comments → fix → get approval |
-| Merge | Merge → deploy (if configured) → task auto-updates |
+| Merge + teardown | Merge → tear down dev environment → deploy (if configured) → task auto-updates |
 | Persist knowledge | New discovery → ask user: team-shared or personal? → store |
