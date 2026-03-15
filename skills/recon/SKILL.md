@@ -15,6 +15,25 @@ Recon is a stack-agnostic auditor that crawls any running web application end-to
 
 The Confidence Letter is designed to be consumed by `/forge` — the user runs `/forge read the confidence letter and gain 100%`, forge picks up every issue as a task, fixes them, and the user re-runs `/recon` until 100% confidence is reached.
 
+## MANDATORY — Mode Routing (Read This FIRST)
+
+**Before executing ANY phase, determine which mode to run:**
+
+| User says | Mode | Jump to |
+|-----------|------|---------|
+| `--per-pr`, "per PR", "each PR", "all PRs", "parallel", "isolated", "each branch", "test each", "parellely" | **Per-PR mode** | **Phase 6 ONLY** — skip Phases 1-5 entirely |
+| Anything else (no per-PR keywords) | **Standard mode** | Phase 1 → 2 → 3 → 4 → 5 |
+
+### Per-PR mode rules (CRITICAL — do NOT violate these):
+
+1. **Do NOT scan localhost ports** — there is nothing running yet, that's the whole point
+2. **Do NOT run `pnpm dev` or `npm start`** — environments are managed by `recon-env.sh`
+3. **Do NOT fall back to Phase 1** — go directly to Phase 6, section "1. Discover open PRs"
+4. **USE `recon-env.sh`** — this script handles git archive extraction, Docker Compose startup, port allocation, health checks, and teardown
+5. **Each PR gets its own isolated Docker Compose environment** with dedicated ports — this is non-negotiable
+
+If you catch yourself port-scanning or starting dev servers in per-PR mode, **STOP — you are in the wrong mode.**
+
 ## Core Principles
 
 - **Stack-agnostic** — Works on any web app: React, Svelte, Vue, Angular, Next.js, Django, FastAPI, Rails, Express, Go, Rust — anything with a running UI server. Auto-detects everything.
@@ -392,6 +411,14 @@ To fix all issues: /forge read the confidence letter and gain 100%
 ```
 
 ## Phase 6 — Per-PR Recon (Parallel Branch Auditing)
+
+> **STOP** — If you reached this phase, you MUST be in per-PR mode. That means:
+> - You skipped Phases 1-5 (they don't apply here)
+> - You have NOT scanned localhost ports or started `pnpm dev`
+> - You are about to use `recon-env.sh` to spin up isolated Docker environments
+> - If any of the above is wrong, go back to the Mode Routing table at the top
+>
+> **Trigger phrases**: `--per-pr`, "per PR", "each PR", "all PRs", "parallel", "isolated", "each branch", "test each", "parellely", "each isolated"
 
 When the user runs `/forge:recon --per-pr` or asks to "recon all open PRs" or "test each PR branch," recon audits every open PR branch in parallel using **isolated Docker Compose environments** managed by the `recon-env.sh` orchestration script.
 
