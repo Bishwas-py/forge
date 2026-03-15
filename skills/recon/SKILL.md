@@ -390,3 +390,184 @@ Full report written to: recon-report-YYYY-MM-DD.md
 
 To fix all issues: /forge read the confidence letter and gain 100%
 ```
+
+## Phase 6 — Per-PR Recon (Parallel Branch Auditing)
+
+When the user runs `/forge:recon --per-pr` or asks to "recon all open PRs" or "test each PR branch," recon audits every open PR branch in parallel using git worktrees and isolated server instances.
+
+### Why this exists
+
+Running recon against `main` only tests merged code. Open PRs contain unmerged changes that may introduce regressions, security issues, or data inconsistencies. Per-PR recon catches these before merge by checking out each branch, building it, running servers, and auditing the live result.
+
+### 1. Discover open PRs
+
+List all open PRs for the current repo:
+
+```bash
+gh pr list --state open --json number,title,headRefName --limit 20
+```
+
+Present the list to the user:
+
+```
+Open PRs found:
+  #42  feature/user-auth       "Add user authentication"
+  #45  fix/pricing-display     "Fix price rounding on order page"
+  #48  feature/dashboard-v2    "Redesign dashboard layout"
+
+Run recon on all 3, or select specific PRs?
+```
+
+Wait for user confirmation. They may exclude PRs or select specific ones.
+
+### 2. Detect stack and build commands
+
+Before creating worktrees, detect how to build and run the project. Read the project's stored knowledge (from `.claude/CLAUDE.md` or forge's persisted state) or detect fresh:
+
+- **Frontend build**: `npm run build`, `npm run dev`, `pnpm dev`, etc.
+- **Backend build**: `pip install -e .`, `cargo build`, `go build`, etc.
+- **Frontend start command**: what starts the dev server
+- **Backend start command**: what starts the API server
+- **DB setup**: does each branch need its own DB, or can they share a read-only DB?
+
+Ask the user to confirm the build/start commands if not already stored.
+
+### 3. Port allocation
+
+Assign unique port ranges to each PR to avoid conflicts. The main app keeps its default ports.
+
+```
+Port allocation:
+  PR #42 (feature/user-auth):      UI=5180, API=8010
+  PR #45 (fix/pricing-display):    UI=5181, API=8011
+  PR #48 (feature/dashboard-v2):   UI=5182, API=8012
+```
+
+Port formula:
+- UI port: `5180 + index`
+- API port: `8010 + index`
+
+This keeps all instances on distinct ports with no collisions.
+
+### 4. Create worktrees
+
+For each selected PR, create an isolated git worktree. Use the Agent tool with `isolation: "worktree"` if available, or create worktrees manually:
+
+```bash
+git worktree add /tmp/recon-pr-42 origin/feature/user-auth
+git worktree add /tmp/recon-pr-45 origin/fix/pricing-display
+git worktree add /tmp/recon-pr-48 origin/feature/dashboard-v2
+```
+
+Each worktree is a full checkout of that branch in an isolated directory.
+
+### 5. Build and start servers (parallel)
+
+For each worktree, in parallel:
+
+1. **Install dependencies**:
+   ```bash
+   cd /tmp/recon-pr-42 && npm install  # or pip install, cargo build, etc.
+   ```
+
+2. **Start frontend** on the allocated port:
+   ```bash
+   cd /tmp/recon-pr-42 && PORT=5180 npm run dev &
+   ```
+
+3. **Start backend** on the allocated port:
+   ```bash
+   cd /tmp/recon-pr-42 && PORT=8010 python -m uvicorn app:main &
+   ```
+   (Adapt commands to the detected stack. Use environment variables or CLI flags to set the port.)
+
+4. **Wait for healthy**: Poll the allocated ports until both UI and API respond:
+   ```bash
+   for i in $(seq 1 30); do
+     curl -s -o /dev/null -w '%{http_code}' http://localhost:5180 && break
+     sleep 2
+   done
+   ```
+
+5. **If build fails**: Record the failure, skip this PR, continue with others. Report the build failure in the final output.
+
+### 6. Run recon per PR (parallel agents)
+
+Dispatch parallel agents — one per PR. Each agent runs the full recon workflow (Phase 1 through Phase 5) against its allocated URLs:
+
+```
+Agent 1: recon against http://localhost:5180 (API: http://localhost:8010) — PR #42
+Agent 2: recon against http://localhost:5181 (API: http://localhost:8011) — PR #45
+Agent 3: recon against http://localhost:5182 (API: http://localhost:8012) — PR #48
+```
+
+Each agent:
+- Skips Phase 1 setup detection (targets are pre-assigned)
+- Runs Phase 2 programmatic scans against its specific URLs
+- Runs Phase 3 page discovery
+- Runs Phase 4 crawl & verify
+- Produces Phase 5 confidence letter, named `recon-confidence-letter-YYYY-MM-DD-pr-{number}.md`
+
+The DB can be shared if all branches use the same schema, or each agent can use its own DB container if the stack supports it. Ask the user during setup.
+
+### 7. Teardown
+
+After all agents complete:
+
+1. **Stop all servers**: Kill the processes started in step 5
+   ```bash
+   # Kill by port
+   lsof -ti:5180 | xargs kill 2>/dev/null
+   lsof -ti:8010 | xargs kill 2>/dev/null
+   # ... repeat for each PR's ports
+   ```
+
+2. **Remove worktrees**:
+   ```bash
+   git worktree remove /tmp/recon-pr-42 --force
+   git worktree remove /tmp/recon-pr-45 --force
+   git worktree remove /tmp/recon-pr-48 --force
+   ```
+
+3. **Prune stale worktree refs**:
+   ```bash
+   git worktree prune
+   ```
+
+### 8. Per-PR report
+
+After all agents finish, produce a combined summary:
+
+```
+Per-PR Recon Complete.
+
+PR #42 (feature/user-auth):      Confidence: 85/100  — 3 issues (1 critical, 2 warnings)
+PR #45 (fix/pricing-display):    Confidence: 92/100  — 1 issue (1 warning)
+PR #48 (feature/dashboard-v2):   Confidence: 78/100  — 5 issues (2 critical, 2 warnings, 1 info)
+                                 BUILD FAILED         — npm install error (missing dep)
+
+Individual confidence letters:
+  recon-confidence-letter-2026-03-15-pr-42.md
+  recon-confidence-letter-2026-03-15-pr-45.md
+  recon-confidence-letter-2026-03-15-pr-48.md
+
+To fix issues in a specific PR:
+  git checkout feature/user-auth && /forge read the confidence letter and gain 100%
+```
+
+### 9. Integration with forge
+
+When the user wants to fix a specific PR's issues:
+
+1. Checkout that PR's branch: `git checkout feature/user-auth`
+2. Run `/forge read the confidence letter and gain 100%` — forge reads `recon-confidence-letter-*-pr-42.md`
+3. Forge fixes the issues on that branch
+4. Push the fixes to the PR
+5. Re-run `/forge:recon --per-pr` or just recon that single branch to verify
+
+### Per-PR mode constraints
+
+- **Max parallel PRs**: Default 5. More than 5 simultaneous builds/servers may exhaust system resources. If more than 5 PRs are open, batch them in groups of 5.
+- **Timeout**: Each PR gets 10 minutes max for build + server startup. If it doesn't start in time, skip it.
+- **Shared DB**: By default, all PR branches share the same database. If a branch has migration changes, warn the user that the DB may need to be branched too.
+- **Resource check**: Before starting, check available memory and CPU. If the system looks resource-constrained, suggest running PRs sequentially instead of in parallel.
