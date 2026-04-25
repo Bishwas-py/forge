@@ -425,115 +425,172 @@ If Phase 1.7 found no dependencies but Phase 3 observes WebSocket/SSE traffic, P
 
 ## Phase 4B — Mutation Propagation Tests (PRIORITY — author these FIRST)
 
-Mutation propagation bugs are the highest-impact, hardest-to-spot defects in any web app. Recon authors these tests BEFORE plain consistency tests (Phase 4A).
+Mutation propagation tests are end-to-end behavioral tests that simulate real multi-actor workflows. Recon checks what happens NEXT across every actor and surface affected — not just whether one value updates on one page. These are the highest-impact, hardest-to-spot defects in any web app. Recon authors them BEFORE plain consistency tests (Phase 4A).
 
-> A mutation propagation test verifies that a state change on one page produces the correct downstream effect on every other page that displays derived data.
+> A mutation propagation test verifies that a state change by one actor produces the correct downstream effect for every other actor on every affected surface — AND verifies that actors who should NOT see the change don't.
 >
-> Pattern: **baseline → mutate → verify-everywhere → cleanup**
+> Pattern: **setup-actors → baseline-everywhere → trigger-action → verify-direct-effect → verify-propagated-effects → verify-non-effects → cleanup**
 >
-> 1. Identify mutation sources (pages with forms, role pickers, status toggles, CRUD actions)
-> 2. For each mutation source, identify all "downstream display sites" — every other route that shows data derived from what this mutation changes
-> 3. Author one test per (mutation, expected delta, downstream sites) tuple
+> 1. **setup-actors**: one Playwright `BrowserContext` per actor (sender, recipient, observer, admin, outsider). Real concurrent sessions.
+> 2. **baseline-everywhere**: capture every relevant surface for every actor.
+> 3. **trigger-action**: actor A performs the action.
+> 4. **verify-direct-effect**: A sees their own action reflected.
+> 5. **verify-propagated-effects**: B, C, D see what they should — right place, right time, right form.
+> 6. **verify-non-effects**: actors who should NOT see it don't (privacy, permissions, tenant isolation).
+> 7. **cleanup**: revert so the test is idempotent.
 
-### Linkage discovery heuristic (run BEFORE authoring tests)
+### Linkage discovery — four questions per mutation source
+
+For each mutation source identified from Phase 3's page map, recon answers four questions and writes tests for each:
+
+1. **WHO else is affected?** → one actor context per affected party (recipient, team members, admins watching dashboards)
+2. **WHERE does it appear for each actor?** → inbox, badge, dashboard, feed, mentions, search — multiple surfaces per actor are normal, test them all
+3. **WHEN should it appear?** → test the strictest expectation (immediate, no reload). If it requires a reload, that's a finding, not a workaround.
+4. **WHO must NOT see it?** → negative-assertion tests for outsiders, other tenants, blocked users, users without permission
+
+To discover linkages programmatically:
 
 1. From Phase 3's page map, classify each page: `mutation-source` (has forms / actions) or `display-only`
 2. For each mutation-source page, query the DB schema (`\d table_name` for postgres, `DESCRIBE table_name` for mysql, equivalent for others) to identify which columns the mutation writes to
 3. For each affected column, grep the API server for endpoints that read those columns: `grep -rn "column_name" <api_dir>`
 4. For each consuming endpoint, find which routes call it (search the frontend for the endpoint path)
-5. The result is a linkage map: `(mutation page, mutated column, [downstream display pages])`
+5. Map actors to routes: which user roles see which routes? Which routes are scoped by user ID, tenant, or permission?
+6. The result is a multi-actor linkage map: `(mutation page, actor, action, [affected actors × surfaces], [excluded actors])`
+
+### Default behavior: over-author
+
+Recon does NOT ask the user whether to write propagation tests. Every mutation source gets, at minimum:
+
+- One **direct-effect** test (the acting actor sees their own action reflected)
+- One **propagation** test per affected actor type (each affected actor sees the right thing on every surface)
+- One **negative-assertion** test (outsiders / other tenants / unprivileged users don't see it)
+
+The user opts OUT, not in. Recon's failure mode is under-authoring, not over-authoring.
 
 ### Test templates — adapt to detected language
 
-Recon picks the template matching Phase 1.6's detected profile. Both templates are shown below for reference; **only the one matching the detected language is used.**
+Recon picks the template matching Phase 1.6's detected profile. If Phase 1.6 detected a non-TS profile, recon translates these into the project's language using equivalent Playwright APIs (Python `sync_playwright`, Java/.NET equivalents). The structure is the contract; the syntax follows the detected profile.
 
-**TypeScript template:**
+**Template 1 — Direct messaging** (A sends to B, verify B receives on multiple surfaces, verify C does not):
 
 ```typescript
-// tests/recon/mutation-promote-admin-propagates-to-dashboard.spec.ts
+// tests/recon/mutation-send-dm-propagates-to-recipient-inbox-and-badge.spec.ts
 import { test, expect } from '@playwright/test';
-import { loginAs, normalizeNumber } from './_helpers';
+import { loginAs } from './_helpers';
 
-test('promoting a user to admin increments admin count on every page that displays it', async ({ page }) => {
-  await loginAs(page, 'admin');
+test('A sends DM to B: B inbox + badge update, C unaffected', async ({ browser }) => {
+  const [aCtx, bCtx, cCtx] = await Promise.all([
+    browser.newContext(), browser.newContext(), browser.newContext(),
+  ]);
+  const [a, b, c] = await Promise.all([aCtx.newPage(), bCtx.newPage(), cCtx.newPage()]);
+  await Promise.all([loginAs(a, 'alice'), loginAs(b, 'bob'), loginAs(c, 'carol')]);
 
-  // 1. Baseline — read displayed admin count from every downstream site
-  const downstreamSites = [
-    { route: '/',                 testid: 'dashboard-admin-count' },
-    { route: '/admin/stats',      testid: 'admin-stats-admin-count' },
-    { route: '/reports/overview', testid: 'reports-admin-count' },
-  ];
-  const baseline: Record<string, number> = {};
-  for (const { route, testid } of downstreamSites) {
-    await page.goto(route);
-    baseline[route] = normalizeNumber(await page.getByTestId(testid).textContent() ?? '');
-  }
+  // baseline
+  await b.goto('/messages');
+  const bInboxBefore = await b.getByTestId('inbox-list').locator('[data-testid="thread-row"]').count();
+  await b.goto('/');
+  const bBadgeBefore = parseInt(await b.getByTestId('unread-badge').textContent() ?? '0', 10);
+  await c.goto('/messages');
+  const cInboxBefore = await c.getByTestId('inbox-list').locator('[data-testid="thread-row"]').count();
 
-  // 2. Mutate — promote a test user via /perms
-  await page.goto('/perms');
-  const testUser = page.getByRole('row', { name: /recon\.test\.user@example\.com/i });
-  await testUser.getByRole('button', { name: /change role/i }).click();
-  await page.getByRole('option', { name: 'Admin' }).click();
-  await expect(page.getByText(/saved|updated/i)).toBeVisible();
+  // trigger
+  const body = 'recon test ' + Date.now();
+  await a.goto('/messages/new');
+  await a.getByLabel('To').fill('bob');
+  await a.getByRole('option', { name: /^bob/i }).click();
+  await a.getByLabel('Message').fill(body);
+  await a.getByRole('button', { name: /send/i }).click();
+  await expect(a.getByText(/sent|delivered/i)).toBeVisible();
 
-  // 3. Verify-everywhere — every downstream site shows baseline + 1
-  for (const { route, testid } of downstreamSites) {
-    await page.goto(route);
-    const after = normalizeNumber(await page.getByTestId(testid).textContent() ?? '');
-    expect(after, `admin count on ${route} did not increment`).toBe(baseline[route] + 1);
-  }
+  // verify-direct
+  await expect(a.getByText(body).last()).toBeVisible();
 
-  // 4. Cleanup — revert to baseline so the test is idempotent
-  await page.goto('/perms');
-  await testUser.getByRole('button', { name: /change role/i }).click();
-  await page.getByRole('option', { name: 'Member' }).click();
+  // verify-propagated — B's inbox, badge, and message content
+  await b.goto('/messages');
+  await expect(b.getByTestId('inbox-list').locator('[data-testid="thread-row"]'))
+    .toHaveCount(bInboxBefore + 1);
+  await b.goto('/');
+  await expect(b.getByTestId('unread-badge')).toHaveText(String(bBadgeBefore + 1));
+  await b.goto('/messages');
+  await b.getByText(body).first().click();
+  await expect(b.getByText(body)).toBeVisible();
+
+  // verify-non-effects — C sees nothing
+  await c.goto('/messages');
+  await expect(c.getByTestId('inbox-list').locator('[data-testid="thread-row"]'))
+    .toHaveCount(cInboxBefore);
+  await c.goto('/');
+  await expect(c.getByText(body)).toHaveCount(0);
+
+  // cleanup — B reads to clear unread
+  await b.goto('/messages');
+  await b.getByText(body).first().click();
 });
 ```
 
-**Python template:**
+**Template 2 — Role/permission change** (admin promotes bob, verify admin count increments, bob gains admin nav, carol unaffected):
 
-```python
-# tests/recon/test_mutation_promote_admin_propagates_to_dashboard.py
-import pytest
-import re
-from playwright.sync_api import Page, expect
-from ._helpers import login_as, normalize_number
+```typescript
+// tests/recon/mutation-promote-user-propagates-to-admin-views-and-not-others.spec.ts
+import { test, expect } from '@playwright/test';
+import { loginAs, normalizeNumber } from './_helpers';
 
+test('promoting bob to admin: admin count increments, bob gains admin nav, carol unaffected', async ({ browser }) => {
+  const [adminCtx, bobCtx, carolCtx] = await Promise.all([
+    browser.newContext(), browser.newContext(), browser.newContext(),
+  ]);
+  const [admin, bob, carol] = await Promise.all([
+    adminCtx.newPage(), bobCtx.newPage(), carolCtx.newPage(),
+  ]);
+  await Promise.all([loginAs(admin, 'admin'), loginAs(bob, 'bob'), loginAs(carol, 'carol')]);
 
-def test_promoting_user_to_admin_increments_admin_count_on_every_display_page(page: Page):
-    login_as(page, "admin")
+  // baseline
+  await admin.goto('/');
+  const adminCountBefore = normalizeNumber(await admin.getByTestId('admin-count').textContent() ?? '');
+  await bob.goto('/');
+  await expect(bob.getByRole('link', { name: /admin/i })).toHaveCount(0);
+  await carol.goto('/');
+  const carolAdminLinkBefore = await carol.getByRole('link', { name: /admin/i }).count();
 
-    # 1. Baseline
-    downstream_sites = [
-        ("/",                 "dashboard-admin-count"),
-        ("/admin/stats",      "admin-stats-admin-count"),
-        ("/reports/overview", "reports-admin-count"),
-    ]
-    baseline = {}
-    for route, testid in downstream_sites:
-        page.goto(route)
-        baseline[route] = normalize_number(page.get_by_test_id(testid).text_content() or "")
+  // trigger
+  await admin.goto('/perms');
+  await admin.getByRole('row', { name: /bob/i })
+             .getByRole('button', { name: /change role/i }).click();
+  await admin.getByRole('option', { name: 'Admin' }).click();
+  await expect(admin.getByText(/saved|updated/i)).toBeVisible();
 
-    # 2. Mutate
-    page.goto("/perms")
-    test_user = page.get_by_role("row", name=re.compile(r"recon\.test\.user@example\.com", re.I))
-    test_user.get_by_role("button", name=re.compile(r"change role", re.I)).click()
-    page.get_by_role("option", name="Admin").click()
-    expect(page.get_by_text(re.compile(r"saved|updated", re.I))).to_be_visible()
+  // verify-direct
+  await expect(admin.getByRole('row', { name: /bob/i }).getByText(/admin/i)).toBeVisible();
 
-    # 3. Verify-everywhere
-    for route, testid in downstream_sites:
-        page.goto(route)
-        after = normalize_number(page.get_by_test_id(testid).text_content() or "")
-        assert after == baseline[route] + 1, f"admin count on {route} did not increment"
+  // verify-propagated
+  await admin.goto('/');
+  await expect(admin.getByTestId('admin-count')).toHaveText(String(adminCountBefore + 1));
+  await bob.reload();
+  await expect(bob.getByRole('link', { name: /admin/i })).toBeVisible();
 
-    # 4. Cleanup
-    page.goto("/perms")
-    test_user.get_by_role("button", name=re.compile(r"change role", re.I)).click()
-    page.get_by_role("option", name="Member").click()
+  // verify-non-effects
+  await carol.reload();
+  await expect(carol.getByRole('link', { name: /admin/i })).toHaveCount(carolAdminLinkBefore);
+
+  // cleanup
+  await admin.goto('/perms');
+  await admin.getByRole('row', { name: /bob/i })
+             .getByRole('button', { name: /change role/i }).click();
+  await admin.getByRole('option', { name: 'Member' }).click();
+});
 ```
 
-Recon authors a **separate test file per linkage** so the worker pool runs them in parallel, and so failure reports name exactly which linkage broke.
+### File-naming rule
+
+One test file per `(action, scenario)` pair — never bundled. Names encode actors and surfaces:
+
+- `mutation-send-dm-propagates-to-recipient-inbox-and-badge`
+- `mutation-promote-user-propagates-to-admin-views-and-not-others`
+- `mutation-delete-post-propagates-to-feed-and-author-profile-and-not-search`
+
+File extensions follow the convention detected in Phase 1.6.
+
+Recon authors a **separate test file per scenario** so the worker pool runs them in parallel, and so failure reports name exactly which actor-surface linkage broke.
 
 ## Phase 4C — Real-Time Channel Propagation Tests (CO-PRIORITY with 4B)
 
@@ -588,27 +645,38 @@ Recon adapts templates to the detected channel and the detected language from Ph
 import { test, expect, BrowserContext } from '@playwright/test';
 import { loginAs, normalizeNumber } from './_helpers';
 
-test('role change broadcasts user.role.changed and updates dashboard without reload', async ({ browser }) => {
-  // Two contexts: one watches, one mutates
+test('role change broadcasts user.role.changed: watcher updates without reload, uninvolved user unaffected', async ({ browser }) => {
+  // Three contexts: one watches, one mutates, one should NOT receive the broadcast
   const watcherCtx = await browser.newContext();
   const mutatorCtx = await browser.newContext();
+  const uninvolvedCtx = await browser.newContext();
   const watcher = await watcherCtx.newPage();
   const mutator = await mutatorCtx.newPage();
+  const uninvolved = await uninvolvedCtx.newPage();
 
   await loginAs(watcher, 'admin');
   await loginAs(mutator, 'admin');
+  await loginAs(uninvolved, 'carol'); // different tenant / unprivileged user
 
-  // 1. Sniff the WebSocket on the watcher
+  // 1. Sniff WebSockets on both watcher and uninvolved
   const wsMessages: any[] = [];
   watcher.on('websocket', (ws) => {
     ws.on('framereceived', (frame) => {
       try { wsMessages.push(JSON.parse(frame.payload as string)); } catch {}
     });
   });
+  const uninvolvedWsMessages: any[] = [];
+  uninvolved.on('websocket', (ws) => {
+    ws.on('framereceived', (frame) => {
+      try { uninvolvedWsMessages.push(JSON.parse(frame.payload as string)); } catch {}
+    });
+  });
 
-  // 2. Watcher subscribes by visiting the dashboard, baseline the count
+  // 2. Watcher and uninvolved subscribe by visiting their dashboards, baseline counts
   await watcher.goto('/');
   const baseline = normalizeNumber(await watcher.getByTestId('dashboard-admin-count').textContent() ?? '');
+  await uninvolved.goto('/');
+  const uninvolvedBaseline = await uninvolved.getByTestId('dashboard-admin-count').textContent() ?? '';
 
   // 3. Mutator promotes a user via /perms
   await mutator.goto('/perms');
@@ -631,7 +699,13 @@ test('role change broadcasts user.role.changed and updates dashboard without rel
     { timeout: 5000 },
   ).toBe(baseline + 1);
 
-  // 6. Cleanup
+  // 6. Non-effect assertion — uninvolved user did NOT receive the broadcast
+  await new Promise((r) => setTimeout(r, 2000)); // grace period
+  expect(uninvolvedWsMessages.find((m) => m?.event === 'user.role.changed'),
+    'uninvolved user should NOT receive user.role.changed').toBeUndefined();
+  await expect(uninvolved.getByTestId('dashboard-admin-count')).toHaveText(uninvolvedBaseline);
+
+  // 7. Cleanup
   await mutator.goto('/perms');
   await testUser.getByRole('button', { name: /change role/i }).click();
   await mutator.getByRole('option', { name: 'Member' }).click();
@@ -840,12 +914,20 @@ Write to `recon-confidence-letter-YYYY-MM-DD.md` in the project root:
 
 ## Findings
 
-### [SEVERITY] Short title
-- **Category**: category name
-- **Page**: /route (or "Global" for cross-cutting issues)
-- **Linkage**: /source-page (mutation) → /downstream-page-1, /downstream-page-2 (affected field)
+### [SEVERITY] Short title (propagation findings)
+- **Category**: Mutation Propagation or Real-Time Propagation
+- **Actors**: alice (sender), bob (recipient), carol (uninvolved control)
+- **Action**: POST /api/endpoint { relevant payload }
+- **Direct effect**: ✓ / ✗ actor A sees their own action
+- **Propagated effect**: ✓ / ✗ description per affected actor and surface
+- **Non-effect**: ✓ / ✗ uninvolved actors correctly unaffected
 - **Wire**: (real-time only) socket emitted event with payload ✓ / ✗
 - **UI**: (real-time only) page updated without reload ✓ / ✗
+- **Root cause hint**: what to fix and where
+
+### [SEVERITY] Short title (non-propagation findings)
+- **Category**: category name
+- **Page**: /route (or "Global" for cross-cutting issues)
 - **UI value**: exact value (or N/A)
 - **API value**: exact value (or N/A)
 - **DB value**: exact value (or N/A)
